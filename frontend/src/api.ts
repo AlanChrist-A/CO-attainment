@@ -75,40 +75,52 @@ export type ComputeResult = {
   warnings: string[];
 };
 
-async function post(path: string, file: File, sheet: string, settings?: Settings): Promise<Response> {
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("sheet", sheet);
-  if (settings) fd.append("settings", JSON.stringify(settings));
-  const res = await fetch(path, { method: "POST", body: fd });
-  if (!res.ok) {
-    let msg = res.status === 413 ? "This file is too large to upload." : `Request failed (${res.status})`;
-    try {
-      const j = await res.json();
-      if (typeof j.detail === "string") msg = j.detail;
-    } catch {
-      /* not JSON */
-    }
-    throw new Error(msg);
-  }
-  return res;
+const MAX_UPLOAD = 15 * 1024 * 1024;
+const worker = new Worker(new URL("./py.worker.ts", import.meta.url), { type: "module" });
+const pending = new Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>();
+let nextId = 1;
+
+worker.onmessage = ({ data }) => {
+  const job = pending.get(data.id);
+  if (!job) return;
+  pending.delete(data.id);
+  if (data.error) job.reject(new Error(data.error));
+  else job.resolve(data.value);
+};
+
+function send<T>(message: object, transfer: Transferable[] = []): Promise<T> {
+  const id = nextId++;
+  return new Promise<T>((resolve, reject) => {
+    pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+    worker.postMessage({ id, ...message }, transfer);
+  });
 }
 
-export const analyze = async (file: File, sheet = "") =>
-  (await (await post("/api/analyze", file, sheet)).json()) as Analysis;
+// Start loading now so the first upload is quicker. A failure is reported on that upload.
+send({ kind: "boot" }).catch(() => {});
 
-export const compute = async (file: File, sheet: string, s: Settings) =>
-  (await (await post("/api/compute", file, sheet, s)).json()) as ComputeResult;
+async function run<T>(kind: string, file: File, sheet: string, settings?: Settings): Promise<T> {
+  if (!/\.(xlsx|xlsm)$/i.test(file.name)) throw new Error("Please upload an Excel .xlsx file.");
+  if (file.size === 0) throw new Error("The file is empty.");
+  if (file.size > MAX_UPLOAD) throw new Error("File is larger than 15 MB.");
+  const buffer = await file.arrayBuffer();
+  return send<T>({ kind, buffer, sheet, settings: settings ? JSON.stringify(settings) : "{}" }, [buffer]);
+}
+
+export const analyze = (file: File, sheet = "") => run<Analysis>("analyze", file, sheet);
+
+export const compute = (file: File, sheet: string, s: Settings) => run<ComputeResult>("compute", file, sheet, s);
 
 export async function exportXlsx(file: File, sheet: string, s: Settings) {
-  const res = await post("/api/export", file, sheet, s);
-  const blob = await res.blob();
-  const cd = res.headers.get("Content-Disposition") ?? "";
-  const name = /filename="([^"]+)"/.exec(cd)?.[1] ?? "CO_attainment.xlsx";
+  const bytes = await run<Uint8Array>("export", file, sheet, s);
+  const blob = new Blob([bytes], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const stem = file.name.replace(/\.[^.]+$/, "").replace(/[^\w\-. ]/g, "_");
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = name;
+  a.download = `${stem}_CO_attainment.xlsx`;
   a.click();
   URL.revokeObjectURL(url);
 }

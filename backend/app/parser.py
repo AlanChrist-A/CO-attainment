@@ -17,7 +17,11 @@ import re
 from dataclasses import dataclass, field
 
 import numpy as np
-from python_calamine import CalamineWorkbook
+
+try:
+    from python_calamine import CalamineWorkbook
+except ImportError:  # not available in the browser runtime
+    CalamineWorkbook = None
 
 # Accepts the common typo C04 (zero instead of the letter O).
 CO_RE = re.compile(r"^\s*C\s*[O0]\s*[-_.]?\s*(\d{1,2})\s*$", re.IGNORECASE)
@@ -167,7 +171,25 @@ def _find_targets(grid, start: int) -> tuple[dict[int, float], dict[int, float]]
     return {}, {}
 
 
+def _load_grids_openpyxl(data: bytes) -> tuple[list[str], dict[str, list[list]]]:
+    from openpyxl import load_workbook
+
+    try:
+        wb = load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+    except Exception as exc:  # noqa: BLE001 - openpyxl raises several types
+        raise SheetFormatError(f"Could not open the file as an Excel workbook ({exc}).") from exc
+    grids = {}
+    for ws in wb.worksheets:
+        ws.reset_dimensions()  # some files store a wrong sheet size
+        grids[ws.title] = [list(r) for r in ws.iter_rows(min_row=1, min_col=1, values_only=True)]
+    names = wb.sheetnames
+    wb.close()
+    return names, grids
+
+
 def load_workbook_grids(data: bytes) -> tuple[list[str], dict[str, list[list]]]:
+    if CalamineWorkbook is None:
+        return _load_grids_openpyxl(data)
     try:
         wb = CalamineWorkbook.from_filelike(io.BytesIO(data))
     except Exception as exc:  # noqa: BLE001 - calamine raises several types

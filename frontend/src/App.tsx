@@ -138,7 +138,9 @@ export default function App() {
             {file ? <strong>{file.name}</strong> : "Choose the department marks sheet (.xlsx)"}
           </span>
           <span className="muted small">
-            Needs a row of CO tags (CO1, CO2 …) with the max-marks row right below it.
+            {busy === "analyze"
+              ? "Reading the file… the first one can take a few seconds."
+              : "Needs a row of CO tags (CO1, CO2 …) with the max-marks row right below it."}
           </span>
         </label>
         {analysis && analysis.sheet_names.length > 1 && (
